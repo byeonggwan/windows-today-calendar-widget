@@ -9,12 +9,55 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using Bwui;
 
 namespace TodayCalendar
 {
+    /// <summary>
+    /// A title cut off with "…" scrolls to its end while the pointer is on its row, then waits and starts over.
+    /// Nothing moves otherwise, and nothing moves at all when Windows animations are turned off.
+    /// </summary>
+    static class Ticker
+    {
+        const double PixelsPerSecond = 40;
+
+        public static void Start(TextBlock t, FrameworkElement box)
+        {
+            if (!SystemParameters.ClientAreaAnimation) return;
+            t.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double full = t.DesiredSize.Width, room = box.ActualWidth;
+            double overflow = full - room;
+            if (room <= 0 || overflow <= 1) return;
+
+            t.TextTrimming = TextTrimming.None;
+            t.Width = full;
+            var shift = new TranslateTransform();
+            t.RenderTransform = shift;
+
+            var scroll = TimeSpan.FromSeconds(overflow / PixelsPerSecond);
+            var holdStart = TimeSpan.FromSeconds(0.6);
+            var holdEnd = TimeSpan.FromSeconds(1.2);
+            var anim = new DoubleAnimationUsingKeyFrames { RepeatBehavior = RepeatBehavior.Forever };
+            anim.KeyFrames.Add(new DiscreteDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromTimeSpan(holdStart)));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(-overflow, KeyTime.FromTimeSpan(holdStart + scroll)));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(-overflow, KeyTime.FromTimeSpan(holdStart + scroll + holdEnd)));
+            shift.BeginAnimation(TranslateTransform.XProperty, anim);
+        }
+
+        public static void Stop(TextBlock t)
+        {
+            var shift = t.RenderTransform as TranslateTransform;
+            if (shift != null) shift.BeginAnimation(TranslateTransform.XProperty, null);
+            t.RenderTransform = Transform.Identity;
+            t.Width = double.NaN;
+            t.TextTrimming = TextTrimming.CharacterEllipsis;
+        }
+    }
+
     static class Program
     {
         [STAThread]
@@ -402,8 +445,12 @@ namespace TodayCalendar
             title.VerticalAlignment = VerticalAlignment.Center;
             title.ToolTip = e.Title + (e.Calendar != null ? "\n" + e.Calendar : "") + "\n" + e.Account;
             if (current) title.FontWeight = FontWeights.SemiBold;
-            Grid.SetColumn(title, 2);
-            g.Children.Add(title);
+            title.HorizontalAlignment = HorizontalAlignment.Left;
+            // The title sits in a clipping box so a long one can scroll inside it on hover (see Ticker).
+            var titleBox = new Grid { ClipToBounds = true };
+            titleBox.Children.Add(title);
+            Grid.SetColumn(titleBox, 2);
+            g.Children.Add(titleBox);
 
             string status = null;
             if (current) status = "~" + e.End.ToString("HH:mm");
@@ -419,7 +466,10 @@ namespace TodayCalendar
 
             string when = e.AllDay ? Bwui.Text.T("종일", "All day") : e.Start.ToString("HH:mm") + "–" + e.End.ToString("HH:mm");
             string name = when + ", " + e.Title + (current ? Bwui.Text.T(", 진행 중", ", now") : "") + ", " + e.Account;
-            return Ui.ListRow(g, RowHeight, name, () => OpenEvent(e));
+            var row = Ui.ListRow(g, RowHeight, name, () => OpenEvent(e));
+            row.MouseEnter += (s, a) => Ticker.Start(title, titleBox);
+            row.MouseLeave += (s, a) => Ticker.Stop(title);
+            return row;
         }
 
         int AccountIndex(string email)
