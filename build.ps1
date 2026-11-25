@@ -37,7 +37,7 @@ if ($LASTEXITCODE) { throw 'Build failed' }
 "Built $out\TodayCalendar.exe"
 
 if ($Snapshots) {
-    $jobs = @(@('today-light', 'light'), @('today-dark', 'dark'), @('setup-light', 'light', 'noaccount'))
+    $jobs = @(@('today-light', 'light'), @('today-dark', 'dark'), @('tomorrow-light', 'light', 'nextday'), @('setup-light', 'light', 'noaccount'))
     foreach ($j in $jobs) {
         $a = @('--snapshot', "$src\docs\$($j[0]).png") + $j[1..($j.Count - 1)]
         Start-Process "$out\TodayCalendar.exe" -ArgumentList $a -Wait

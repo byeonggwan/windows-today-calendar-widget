@@ -80,17 +80,40 @@ namespace TodayCalendar
         static readonly TimeSpan FetchEvery = TimeSpan.FromMinutes(5);
         const double RowHeight = 32, TimeColumn = 44;
 
+        // Another day goes back to today once it has been left alone this long (an always-on widget
+        // shouldn't keep showing tomorrow as if it were today).
+        static readonly TimeSpan ReturnToToday = TimeSpan.FromMinutes(1);
+        const string HomeGlyph = "";
+
+        /// <summary>One day's events and fetch state.</summary>
+        sealed class DayData
+        {
+            public List<CalEvent> Events;     // null until the first fetch for the day finishes
+            public DateTime? FetchedAt;       // UTC of the last fetch where every account answered
+            public DateTime LastAttempt = DateTime.MinValue;
+            public string Problem;
+            public bool Busy;
+        }
+
         readonly string accountsPath, clientPath;
         OAuthClient client;
         List<Account> accounts = new List<Account>();
-        List<CalEvent> events;          // null until the first fetch finishes
-        DateTime? fetchedAt;            // UTC of the last fetch where every account answered
-        DateTime fetchedDay;
-        DateTime lastAttempt = DateTime.MinValue;
-        string problem;
+        readonly Dictionary<DateTime, DayData> days = new Dictionary<DateTime, DayData>();
+        DateTime viewDay;                     // the day shown; today unless the user moved
+        DateTime lastNav = DateTime.MinValue; // UTC of the last ‹ › press
+        string problem;                       // sign-in and setup problems
         bool signingIn;
-        volatile bool busy;
         DateTime? snapshotNow;
+
+        DayData Day(DateTime d)
+        {
+            DayData x;
+            if (!days.TryGetValue(d, out x)) days[d] = x = new DayData();
+            return x;
+        }
+
+        DayData View { get { return Day(viewDay); } }
+        bool ViewingToday { get { return viewDay == Now.Date; } }
 
         public CalendarWidget() : base(Id, "Today")
         {
@@ -109,19 +132,46 @@ namespace TodayCalendar
 
             client = BuiltIn ?? OAuthClient.Load(clientPath);
             accounts = AccountStore.Load(accountsPath);
+            viewDay = Now.Date;
             Render();
 
             // Relative times ("in 20 min") change every minute; fetches run every 5 minutes, doubled on battery.
             var tick = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
             tick.Tick += (s, e) =>
             {
-                bool newDay = events != null && fetchedDay != Now.Date;
-                if (newDay || DateTime.UtcNow - lastAttempt >= Bwui.App.Interval(FetchEvery)) Fetch();
+                var today = Now.Date;
+                if (viewDay != today && DateTime.UtcNow - lastNav >= ReturnToToday && !IsMouseOver) viewDay = today;
+                FetchIfDue(today);
+                if (viewDay != today) FetchIfDue(viewDay);
                 Render();
             };
             tick.Start();
             Closed += (s, e) => tick.Stop();
             Dispatcher.BeginInvoke(new Action(Fetch), DispatcherPriority.Background);
+        }
+
+        void FetchIfDue(DateTime d)
+        {
+            if (DateTime.UtcNow - Day(d).LastAttempt >= Bwui.App.Interval(FetchEvery)) Fetch(d);
+        }
+
+        void Go(int delta)
+        {
+            viewDay = viewDay.AddDays(delta);
+            lastNav = DateTime.UtcNow;
+            // Keep the cache small: today, the day shown, and its neighbours.
+            foreach (var d in new List<DateTime>(days.Keys))
+                if (d != Now.Date && Math.Abs((d - viewDay).TotalDays) > 3) days.Remove(d);
+            Render();
+            FetchIfDue(viewDay);
+        }
+
+        void GoToday()
+        {
+            viewDay = Now.Date;
+            lastNav = DateTime.MinValue;
+            Render();
+            FetchIfDue(viewDay);
         }
 
         DateTime Now { get { return snapshotNow ?? DateTime.Now; } }
@@ -190,7 +240,7 @@ namespace TodayCalendar
         {
             accounts.Remove(a);
             SaveAccounts();
-            if (events != null) events.RemoveAll(e => e.Account == a.Email);
+            foreach (var d in days.Values) if (d.Events != null) d.Events.RemoveAll(e => e.Account == a.Email);
             Render();
             // Also revoke the grant at Google, best effort.
             var token = a.RefreshToken;
@@ -235,12 +285,14 @@ namespace TodayCalendar
 
         // ---------- data ----------
 
-        void Fetch()
+        void Fetch() { Fetch(viewDay); }
+
+        void Fetch(DateTime day)
         {
-            if (busy || client == null || accounts.Count == 0) return;
-            busy = true;
-            lastAttempt = DateTime.UtcNow;
-            var day = Now.Date;
+            var dd = Day(day);
+            if (dd.Busy || client == null || accounts.Count == 0) return;
+            dd.Busy = true;
+            dd.LastAttempt = DateTime.UtcNow;
             var c = client;
             var accs = accounts.ToArray();
             ThreadPool.QueueUserWorkItem(_ =>
@@ -256,16 +308,16 @@ namespace TodayCalendar
                 var merged = Merge(all);
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    busy = false;
+                    dd.Busy = false;
                     if (err == null)
                     {
-                        events = merged; fetchedAt = DateTime.UtcNow; fetchedDay = day; problem = null;
+                        dd.Events = merged; dd.FetchedAt = DateTime.UtcNow; dd.Problem = null;
                     }
                     else
                     {
                         // Keep the last good list; the stale caption says how old it is (DESIGN.md §5).
-                        if (events == null || fetchedDay != day) { events = merged; fetchedDay = day; }
-                        problem = Bwui.Text.T("일정을 불러오지 못했어요", "Couldn't load events");
+                        if (dd.Events == null) dd.Events = merged;
+                        dd.Problem = Bwui.Text.T("일정을 불러오지 못했어요", "Couldn't load events");
                     }
                     Render();
                 }));
@@ -297,7 +349,7 @@ namespace TodayCalendar
 
         void OpenDay()
         {
-            var d = Now.Date;
+            var d = viewDay == DateTime.MinValue ? Now.Date : viewDay;
             var url = "https://calendar.google.com/calendar/r/day/" + d.Year + "/" + d.Month + "/" + d.Day;
             if (accounts.Count > 0) url += "?" + AuthUser(accounts[0].Email);
             Open(url);
@@ -321,18 +373,31 @@ namespace TodayCalendar
             var p = Theme.Current;
             var accent = p.Accent(AccentL, AccentD);
             var sp = new StackPanel();
-            var f = Freshness.Of(fetchedAt, TimeSpan.FromMinutes(15), TimeSpan.FromHours(3));
+            var view = View;
+            var events = view.Events;
+            var f = Freshness.Of(view.FetchedAt, TimeSpan.FromMinutes(15), TimeSpan.FromHours(3));
 
+            // ⌂ › [↗]: look ahead, then come back. Past days aren't offered. The home button keeps its
+            // place when hidden, so › never moves under the pointer.
             var trail = new StackPanel { Orientation = Orientation.Horizontal };
-            if (f.Caption != null && events != null)
+            var home = Ui.IconButton(HomeGlyph, Bwui.Text.T("오늘로", "Back to today"), GoToday);
+            home.Visibility = ViewingToday ? Visibility.Hidden : Visibility.Visible;
+            trail.Children.Add(home);
+            trail.Children.Add(Spaced(Ui.IconButton(Glyphs.ChevronRight, Bwui.Text.T("다음 날", "Next day"), () => Go(1))));
+            if (CurrentSize != WidgetSize.Compact)
+                trail.Children.Add(Spaced(Ui.IconButton(OpenGlyph, Bwui.Text.T("구글 캘린더에서 보기", "Open in Google Calendar"), OpenDay)));
+            sp.Children.Add(Ui.Header(Ui.Icon(null, accent, CalendarGlyph), DayTitle(viewDay), trail));
+
+            // Another day is named in words too, so it can't be mistaken for today.
+            string rel = RelativeDay(viewDay - Now.Date);
+            string caption = rel;
+            if (f.Caption != null && events != null) caption = caption == null ? f.Caption : caption + " · " + f.Caption;
+            if (caption != null)
             {
-                var cap = Ui.Text(f.Caption, TextStyle.Caption);
-                cap.VerticalAlignment = VerticalAlignment.Center;
-                cap.Margin = new Thickness(0, 0, Tokens.Space2, 0);
-                trail.Children.Add(cap);
+                var cap = Ui.Text(caption, TextStyle.Caption, rel != null ? accent : p.TextSecondary);
+                cap.Margin = new Thickness(0, Tokens.Space1, 0, 0);
+                sp.Children.Add(cap);
             }
-            trail.Children.Add(Ui.IconButton(OpenGlyph, Bwui.Text.T("구글 캘린더에서 보기", "Open in Google Calendar"), OpenDay));
-            sp.Children.Add(Ui.Header(Ui.Icon(null, accent, CalendarGlyph), DayTitle(Now), trail));
 
             // Setup and sign-in states come first; they replace the list only when there is nothing to show.
             if (client == null && !Bwui.App.IsSnapshot)
@@ -356,21 +421,38 @@ namespace TodayCalendar
 
             if (events == null)
             {
-                if (problem != null) AddMessage(sp, Ui.Message(problem, Bwui.Text.Retry, Fetch));
+                if (view.Problem != null) AddMessage(sp, Ui.Message(view.Problem, Bwui.Text.Retry, Fetch));
                 else { var sk = Ui.Skeleton(ContentWidth, 3); sk.Margin = new Thickness(0, Tokens.Space3, 0, 0); sp.Children.Add(sk); }
                 return sp;
             }
-            if (problem != null && f.HasData) AddMessage(sp, Ui.Message(problem, Bwui.Text.Retry, Fetch));
+            if (view.Problem != null && f.HasData) AddMessage(sp, Ui.Message(view.Problem, Bwui.Text.Retry, Fetch));
             if (events.Count == 0)
             {
-                AddMessage(sp, Ui.Message(Bwui.Text.T("오늘 일정이 없어요", "Nothing on your calendar today")));
+                AddMessage(sp, Ui.Message(ViewingToday ? Bwui.Text.T("오늘 일정이 없어요", "Nothing on your calendar today")
+                                                       : Bwui.Text.T("이 날은 일정이 없어요", "Nothing on your calendar this day")));
                 return sp;
             }
 
             var list = new StackPanel { Margin = new Thickness(-Tokens.Space2, Tokens.Space2, -Tokens.Space2, 0), Opacity = f.BodyOpacity };
-            foreach (var row in Rows(p, accent)) list.Children.Add(row);
+            foreach (var row in Rows(p, accent, events)) list.Children.Add(row);
             sp.Children.Add(list);
             return sp;
+        }
+
+        static FrameworkElement Spaced(FrameworkElement b)
+        {
+            b.Margin = new Thickness(Tokens.Space1, 0, 0, 0);
+            return b;
+        }
+
+        /// <summary>"내일", "모레", "3일 후"… for a later day; null for today.</summary>
+        static string RelativeDay(TimeSpan diff)
+        {
+            int n = (int)Math.Round(diff.TotalDays);
+            if (n <= 0) return null;
+            if (n == 1) return Bwui.Text.T("내일", "Tomorrow");
+            if (n == 2) return Bwui.Text.T("모레", "In 2 days");
+            return Bwui.Text.T(n + "일 후", "In " + n + " days");
         }
 
         static void AddMessage(StackPanel sp, FrameworkElement m)
@@ -381,9 +463,10 @@ namespace TodayCalendar
 
         int MaxRows { get { return CurrentSize == WidgetSize.Compact ? 4 : CurrentSize == WidgetSize.Wide ? 8 : 6; } }
 
-        List<UIElement> Rows(Palette p, Color accent)
+        List<UIElement> Rows(Palette p, Color accent, List<CalEvent> events)
         {
-            var now = Now;
+            // "Finished", "now" and "next" only make sense for today; on a later day everything is ahead.
+            var now = ViewingToday ? Now : DateTime.MinValue;
             var shown = new List<CalEvent>(events);
             // Too many for the size: what's still ahead matters most. Drop finished events first, then
             // all-day ones from the bottom up, then the latest timed ones; one row links to the full day.
@@ -496,8 +579,9 @@ namespace TodayCalendar
         {
             client = BuiltIn ?? OAuthClient.Load(clientPath);
             accounts = AccountStore.Load(accountsPath);
+            viewDay = DateTime.Today.AddDays(SnapshotDayOffset);
             if (client == null) return;
-            var day = DateTime.Today;
+            var day = viewDay;
             var all = new List<CalEvent>();
             foreach (var a in accounts)
             {
@@ -505,25 +589,29 @@ namespace TodayCalendar
                 catch (SignInRequiredException) { a.NeedsSignIn = true; }
                 catch (Exception ex) { problem = ex.Message; }
             }
-            events = Merge(all); fetchedAt = DateTime.UtcNow; fetchedDay = day;
+            View.Events = Merge(all); View.FetchedAt = DateTime.UtcNow;
         }
+
+        /// <summary>Snapshot argument "nextday" shows tomorrow, as after pressing ›.</summary>
+        static int SnapshotDayOffset { get { return Array.IndexOf(Bwui.App.SnapshotArgs ?? new string[0], "nextday") >= 0 ? 1 : 0; } }
 
         void LoadSample()
         {
             var args = Bwui.App.SnapshotArgs ?? new string[0];
-            var today = DateTime.Today;
-            snapshotNow = today.AddHours(10).AddMinutes(40);
+            snapshotNow = DateTime.Today.AddHours(10).AddMinutes(40);
+            viewDay = DateTime.Today.AddDays(SnapshotDayOffset);
+            var today = viewDay;
             if (Array.IndexOf(args, "noaccount") >= 0) { client = new OAuthClient(); return; }
             client = new OAuthClient();
             string work = "me@company.example", home = "me@gmail.example";
             accounts = new List<Account> { new Account { Email = work }, new Account { Email = home } };
-            fetchedAt = DateTime.UtcNow; fetchedDay = today;
-            if (Array.IndexOf(args, "empty") >= 0) { events = new List<CalEvent>(); return; }
+            View.FetchedAt = DateTime.UtcNow;
+            if (Array.IndexOf(args, "empty") >= 0) { View.Events = new List<CalEvent>(); return; }
             Func<string, int, int, int, int, string, CalEvent> ev = (t, h1, m1, h2, m2, acc) => new CalEvent
             {
                 Title = t, Account = acc, Start = today.AddHours(h1).AddMinutes(m1), End = today.AddHours(h2).AddMinutes(m2)
             };
-            events = Merge(new List<CalEvent>
+            View.Events = Merge(new List<CalEvent>
             {
                 new CalEvent { Title = Bwui.Text.T("재택 근무", "Working from home"), Account = work, AllDay = true, Start = today, End = today.AddDays(1) },
                 ev(Bwui.Text.T("주간 스탠드업", "Weekly stand-up"), 9, 30, 10, 0, work),
