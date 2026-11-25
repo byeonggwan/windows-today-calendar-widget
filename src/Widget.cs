@@ -117,6 +117,8 @@ namespace TodayCalendar
 
         public CalendarWidget() : base(Id, "Today")
         {
+            // The list grows and shrinks with the day's events: keep the header in place and let the bottom move.
+            AnchorBottom = false;
             var dir = Bwui.App.DataDir(Id);
             accountsPath = System.IO.Path.Combine(dir, "accounts.json");
             clientPath = System.IO.Path.Combine(dir, "oauth-client.json");
@@ -287,41 +289,52 @@ namespace TodayCalendar
 
         void Fetch() { Fetch(viewDay); }
 
+        /// <summary>
+        /// Fetches the day and the one after it in one round (all accounts and calendars in parallel),
+        /// so › to tomorrow is already loaded.
+        /// </summary>
         void Fetch(DateTime day)
         {
             var dd = Day(day);
+            var next = Day(day.AddDays(1));
             if (dd.Busy || client == null || accounts.Count == 0) return;
-            dd.Busy = true;
-            dd.LastAttempt = DateTime.UtcNow;
+            dd.Busy = next.Busy = true;
+            dd.LastAttempt = next.LastAttempt = DateTime.UtcNow;
             var c = client;
             var accs = accounts.ToArray();
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                var all = new List<CalEvent>();
+                var perAccount = new List<CalEvent>[accs.Length];
                 string err = null;
-                foreach (var a in accs)
+                System.Threading.Tasks.Parallel.For(0, accs.Length, i =>
                 {
-                    try { all.AddRange(GoogleCalendar.Day(c, a, day, day.AddDays(1))); a.NeedsSignIn = false; }
+                    var a = accs[i];
+                    try { perAccount[i] = GoogleCalendar.Range(c, a, day, day.AddDays(2)); a.NeedsSignIn = false; }
                     catch (SignInRequiredException) { a.NeedsSignIn = true; }
                     catch (Exception ex) { err = ex.Message; }
-                }
-                var merged = Merge(all);
+                });
+                var all = new List<CalEvent>();
+                foreach (var l in perAccount) if (l != null) all.AddRange(l);
+                var first = Merge(all.FindAll(e => Overlaps(e, day)));
+                var second = Merge(all.FindAll(e => Overlaps(e, day.AddDays(1))));
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    dd.Busy = false;
-                    if (err == null)
-                    {
-                        dd.Events = merged; dd.FetchedAt = DateTime.UtcNow; dd.Problem = null;
-                    }
-                    else
-                    {
-                        // Keep the last good list; the stale caption says how old it is (DESIGN.md §5).
-                        if (dd.Events == null) dd.Events = merged;
-                        dd.Problem = Bwui.Text.T("일정을 불러오지 못했어요", "Couldn't load events");
-                    }
+                    Store(dd, first, err);
+                    Store(next, second, err);
                     Render();
                 }));
             });
+        }
+
+        static bool Overlaps(CalEvent e, DateTime day) { return e.Start < day.AddDays(1) && e.End > day; }
+
+        static void Store(DayData d, List<CalEvent> events, string err)
+        {
+            d.Busy = false;
+            if (err == null) { d.Events = events; d.FetchedAt = DateTime.UtcNow; d.Problem = null; return; }
+            // Keep the last good list; the stale caption says how old it is (DESIGN.md §5).
+            if (d.Events == null) d.Events = events;
+            d.Problem = Bwui.Text.T("일정을 불러오지 못했어요", "Couldn't load events");
         }
 
         /// <summary>One entry per event even if it is on two calendars or two accounts; all-day first, then by start.</summary>
@@ -585,7 +598,7 @@ namespace TodayCalendar
             var all = new List<CalEvent>();
             foreach (var a in accounts)
             {
-                try { all.AddRange(GoogleCalendar.Day(client, a, day, day.AddDays(1))); }
+                try { all.AddRange(GoogleCalendar.Range(client, a, day, day.AddDays(1))); }
                 catch (SignInRequiredException) { a.NeedsSignIn = true; }
                 catch (Exception ex) { problem = ex.Message; }
             }

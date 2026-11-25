@@ -14,7 +14,8 @@ Built on [BWUI](https://github.com/byeonggwan/bwui), a small design system for W
 
 - Shows the calendars each account has ticked in Google Calendar, so it matches what you see there.
 - All-day events first, then by time. Finished events are dimmed, the current one is bold with its end time, and the next one says how soon it starts.
-- **›** looks ahead a day at a time, with *Tomorrow* / *In 3 days* under the date; **⌂** comes back to today. Left alone for a minute, it goes back to today by itself.
+- **›** looks ahead a day at a time, with *Tomorrow* / *In 3 days* under the date; **⌂** comes back to today. Left alone for a minute, it goes back to today by itself. Tomorrow is fetched together with today, so the first › shows it at once.
+- The header stays put; the card grows or shrinks downward as the day's events change.
 - With more than one account, a colored dot marks which account each event is from. An event on two calendars or accounts is shown once.
 - Leaves out cancelled events, events you declined, and working-location entries.
 - Read-only access. Each account's sign-in is stored encrypted for your Windows user (DPAPI); nothing is sent anywhere except Google.

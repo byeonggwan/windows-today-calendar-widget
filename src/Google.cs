@@ -42,6 +42,9 @@ namespace TodayCalendar
         public DateTime AccessExpiresUtc;
         /// <summary>Google rejected the refresh token (revoked, expired or password changed): sign in again.</summary>
         public bool NeedsSignIn;
+        /// <summary>The calendars shown in Google Calendar (id, name), kept for a while so each refresh is one round of event requests.</summary>
+        public List<KeyValuePair<string, string>> Calendars;
+        public DateTime CalendarsAtUtc;
     }
 
     sealed class SignInRequiredException : Exception
@@ -294,34 +297,60 @@ namespace TodayCalendar
     {
         const string Api = "https://www.googleapis.com/calendar/v3/";
 
+        static readonly TimeSpan CalendarListFor = TimeSpan.FromMinutes(30);
+
         /// <summary>
-        /// Every event overlapping [dayStart, dayEnd) on the calendars this account shows in Google Calendar
+        /// Every event overlapping [start, end) on the calendars this account shows in Google Calendar
         /// (the ones ticked in its list). Skips cancelled events, ones you declined, and working-location entries.
+        /// The calendars are asked in parallel; the calendar list itself is reused for 30 minutes.
         /// </summary>
-        public static List<CalEvent> Day(OAuthClient client, Account a, DateTime dayStart, DateTime dayEnd)
+        public static List<CalEvent> Range(OAuthClient client, Account a, DateTime start, DateTime end)
         {
             string token = GoogleAuth.AccessToken(client, a);
-            var list = new List<CalEvent>();
-            var cals = Json.Parse(Get(token, "users/me/calendarList?fields=items(id,summary,summaryOverride,selected,hidden)&maxResults=250"));
-            foreach (Dictionary<string, object> c in Json.Arr(cals, "items"))
+            var cals = a.Calendars;
+            if (cals == null || DateTime.UtcNow - a.CalendarsAtUtc > CalendarListFor)
             {
-                if (!Json.Bool(c, "selected") || Json.Bool(c, "hidden")) continue;
-                string calId = Json.Str(c, "id");
-                string calName = Json.Str(c, "summaryOverride") ?? Json.Str(c, "summary");
-                string q = "calendars/" + Uri.EscapeDataString(calId) + "/events"
-                    + "?singleEvents=true&orderBy=startTime&maxResults=100"
-                    + "&timeMin=" + Uri.EscapeDataString(Rfc3339(dayStart))
-                    + "&timeMax=" + Uri.EscapeDataString(Rfc3339(dayEnd))
-                    + "&fields=" + Uri.EscapeDataString("items(status,summary,start,end,htmlLink,iCalUID,eventType,attendees(self,responseStatus))");
-                Dictionary<string, object> evs;
-                try { evs = Json.Parse(Get(token, q)); }
-                catch (WebException ex)
+                cals = new List<KeyValuePair<string, string>>();
+                var doc = Json.Parse(Get(token, "users/me/calendarList?fields=items(id,summary,summaryOverride,selected,hidden)&maxResults=250"));
+                foreach (Dictionary<string, object> c in Json.Arr(doc, "items"))
                 {
-                    // A calendar we can't read (permissions changed) shouldn't hide the rest.
-                    var r = ex.Response as HttpWebResponse;
-                    if (r != null && (r.StatusCode == HttpStatusCode.NotFound || r.StatusCode == HttpStatusCode.Forbidden)) continue;
-                    throw;
+                    if (!Json.Bool(c, "selected") || Json.Bool(c, "hidden")) continue;
+                    cals.Add(new KeyValuePair<string, string>(Json.Str(c, "id"), Json.Str(c, "summaryOverride") ?? Json.Str(c, "summary")));
                 }
+                a.Calendars = cals; a.CalendarsAtUtc = DateTime.UtcNow;
+            }
+
+            var results = new List<CalEvent>[cals.Count];
+            Exception failure = null;
+            System.Threading.Tasks.Parallel.For(0, cals.Count, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+            {
+                try { results[i] = Calendar(token, a.Email, cals[i].Key, cals[i].Value, start, end); }
+                catch (Exception ex) { failure = ex; }
+            });
+            if (failure != null) throw failure;
+            var list = new List<CalEvent>();
+            foreach (var r in results) if (r != null) list.AddRange(r);
+            return list;
+        }
+
+        static List<CalEvent> Calendar(string token, string account, string calId, string calName, DateTime start, DateTime end)
+        {
+            var list = new List<CalEvent>();
+            string q = "calendars/" + Uri.EscapeDataString(calId) + "/events"
+                + "?singleEvents=true&orderBy=startTime&maxResults=250"
+                + "&timeMin=" + Uri.EscapeDataString(Rfc3339(start))
+                + "&timeMax=" + Uri.EscapeDataString(Rfc3339(end))
+                + "&fields=" + Uri.EscapeDataString("items(status,summary,start,end,htmlLink,iCalUID,eventType,attendees(self,responseStatus))");
+            Dictionary<string, object> evs;
+            try { evs = Json.Parse(Get(token, q)); }
+            catch (WebException ex)
+            {
+                // A calendar we can't read (permissions changed) shouldn't hide the rest.
+                var r = ex.Response as HttpWebResponse;
+                if (r != null && (r.StatusCode == HttpStatusCode.NotFound || r.StatusCode == HttpStatusCode.Forbidden)) return list;
+                throw;
+            }
+            {
                 foreach (Dictionary<string, object> e in Json.Arr(evs, "items"))
                 {
                     if (Json.Str(e, "status") == "cancelled") continue;
@@ -333,7 +362,7 @@ namespace TodayCalendar
                         Title = Json.Str(e, "summary") ?? Bwui.Text.T("(제목 없음)", "(No title)"),
                         Link = Json.Str(e, "htmlLink"),
                         Uid = Json.Str(e, "iCalUID"),
-                        Account = a.Email,
+                        Account = account,
                         Calendar = calName
                     };
                     var s = Json.Obj(e, "start"); var en = Json.Obj(e, "end");
@@ -379,6 +408,9 @@ namespace TodayCalendar
         public static HttpWebRequest Request(string url, string method, string bearer)
         {
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            // .NET Framework allows only 2 connections per host by default, which would serialize the
+            // per-calendar requests again.
+            if (ServicePointManager.DefaultConnectionLimit < 16) ServicePointManager.DefaultConnectionLimit = 16;
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Method = method;
             req.UserAgent = "TodayCalendarWidget";
