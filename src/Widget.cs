@@ -34,6 +34,9 @@ namespace TodayCalendar
 
             t.TextTrimming = TextTrimming.None;
             t.Width = full;
+            // WPF clips an element to its layout slot when it is wider than the slot, which would cut the
+            // text at the old width. A negative right margin widens the slot; the box still clips the view.
+            t.Margin = new Thickness(0, 0, -overflow, 0);
             var shift = new TranslateTransform();
             t.RenderTransform = shift;
 
@@ -54,6 +57,7 @@ namespace TodayCalendar
             if (shift != null) shift.BeginAnimation(TranslateTransform.XProperty, null);
             t.RenderTransform = Transform.Identity;
             t.Width = double.NaN;
+            t.Margin = new Thickness(0);
             t.TextTrimming = TextTrimming.CharacterEllipsis;
         }
     }
