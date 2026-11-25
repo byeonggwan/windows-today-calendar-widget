@@ -51,7 +51,14 @@ namespace TodayCalendar
             accountsPath = System.IO.Path.Combine(dir, "accounts.json");
             clientPath = System.IO.Path.Combine(dir, "oauth-client.json");
 
-            if (Bwui.App.IsSnapshot) { LoadSample(); Render(); return; }
+            if (Bwui.App.IsSnapshot)
+            {
+                // "live": render your real accounts (for checking a setup; don't publish the image).
+                if (Array.IndexOf(Bwui.App.SnapshotArgs ?? new string[0], "live") >= 0) LoadLive();
+                else LoadSample();
+                Render();
+                return;
+            }
 
             client = BuiltIn ?? OAuthClient.Load(clientPath);
             accounts = AccountStore.Load(accountsPath);
@@ -331,18 +338,20 @@ namespace TodayCalendar
         {
             var now = Now;
             var shown = new List<CalEvent>(events);
-            // Too many: drop finished timed events first, then cut the tail and link to the full day.
-            while (shown.Count > MaxRows)
+            // Too many for the size: what's still ahead matters most. Drop finished events first, then
+            // all-day ones from the bottom up, then the latest timed ones; one row links to the full day.
+            int hidden = 0;
+            int room = MaxRows;
+            while (shown.Count > room)
             {
                 int i = shown.FindIndex(e => !e.AllDay && e.End <= now);
-                if (i < 0) break;
+                if (i >= 0) { shown.RemoveAt(i); continue; }
+                if (hidden == 0) room = MaxRows - 1;        // make room for the "N more" row
+                if (shown.Count <= room) break;
+                i = shown.FindLastIndex(e => e.AllDay);
+                if (i < 0) i = shown.Count - 1;
                 shown.RemoveAt(i);
-            }
-            int hidden = 0;
-            if (shown.Count > MaxRows)
-            {
-                hidden = shown.Count - (MaxRows - 1);
-                shown = shown.GetRange(0, MaxRows - 1);
+                hidden++;
             }
 
             bool multi = accounts.Count > 1;
@@ -428,6 +437,22 @@ namespace TodayCalendar
         }
 
         // ---------- snapshot sample ----------
+
+        void LoadLive()
+        {
+            client = BuiltIn ?? OAuthClient.Load(clientPath);
+            accounts = AccountStore.Load(accountsPath);
+            if (client == null) return;
+            var day = DateTime.Today;
+            var all = new List<CalEvent>();
+            foreach (var a in accounts)
+            {
+                try { all.AddRange(GoogleCalendar.Day(client, a, day, day.AddDays(1))); }
+                catch (SignInRequiredException) { a.NeedsSignIn = true; }
+                catch (Exception ex) { problem = ex.Message; }
+            }
+            events = Merge(all); fetchedAt = DateTime.UtcNow; fetchedDay = day;
+        }
 
         void LoadSample()
         {
