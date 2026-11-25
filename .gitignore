@@ -1,0 +1,4 @@
+bin/
+*.png.tmp
+# The Google OAuth client is built in from here locally; never commit it.
+oauth-client.json

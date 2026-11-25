@@ -1,0 +1,47 @@
+# Builds the widget on a Windows runner when a tag like v1.2.3 is pushed, then publishes a GitHub
+# release with each file and its .sha256. BWUI's updater installs from these releases (DESIGN.md §6.10).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  VERSION_FILE: VERSION
+  BUILD: ./build.ps1 -NoInstall
+  GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+  GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+  FILES: bin/TodayCalendar.exe
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version
+        shell: pwsh
+        run: |
+          $v = (Get-Content $env:VERSION_FILE).Trim()
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "$env:VERSION_FILE says $v but the tag is $env:GITHUB_REF_NAME" }
+
+      - name: Build
+        shell: pwsh
+        run: Invoke-Expression $env:BUILD
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = $env:FILES -split ' '
+          $assets = @()
+          foreach ($f in $files) {
+            $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path $f -Leaf)" | Out-File "$f.sha256" -Encoding ascii -NoNewline
+            $assets += $f, "$f.sha256"
+          }
+          gh release create $env:GITHUB_REF_NAME @assets --title $env:GITHUB_REF_NAME --generate-notes
