@@ -26,6 +26,11 @@ if (-not $clientId -and (Test-Path "$src\oauth-client.json")) {
     $o = if ($j.installed) { $j.installed } else { $j }
     $clientId = $o.client_id; $clientSecret = $o.client_secret
 }
+# A secret pasted from a file can carry a BOM or a line break, and Google then can't find the client.
+$junk = [char[]]@(0xFEFF, 32, 13, 10, 9)
+if ($clientId) { $clientId = $clientId.Trim($junk) }
+if ($clientSecret) { $clientSecret = $clientSecret.Trim($junk) }
+if ($clientId -and $clientId -notmatch '^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$') { throw 'The Google OAuth client ID looks malformed.' }
 if (-not $clientId) { Write-Warning 'No Google OAuth client: this build will ask for a client file.' }
 Set-Content "$out\ClientInfo.g.cs" ('namespace TodayCalendar { static class BuiltInClient { public const string Id = "' + $clientId + '"; public const string Secret = "' + $clientSecret + '"; } }') -Encoding utf8
 
