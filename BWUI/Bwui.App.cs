@@ -11,6 +11,8 @@ using Microsoft.Win32;
 
 // Targeting 4.8 turns on WPF's per-monitor DPI scaling (DESIGN.md §6.8, C11).
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
+// The app version in the exe's file properties, so BWHub can tell which version is installed (DESIGN.md §6.11).
+[assembly: System.Reflection.AssemblyInformationalVersion(Bwui.AppInfo.Version)]
 
 namespace Bwui
 {
@@ -95,6 +97,13 @@ namespace Bwui
             Dir = App.DataDir(appId);
             FilePath = Path.Combine(Dir, "settings.txt");
             try { Directory.CreateDirectory(Dir); } catch { }
+            Reload();
+        }
+
+        /// <summary>Reads the file again, e.g. after BWHub changed it (DESIGN.md §6.11).</summary>
+        public void Reload()
+        {
+            map.Clear();
             try
             {
                 if (!File.Exists(FilePath)) return;

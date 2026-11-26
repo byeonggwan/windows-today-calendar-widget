@@ -302,24 +302,88 @@ namespace Bwui
             SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h, GWL_EXSTYLE) | WS_EX_TOOLWINDOW);
             var src = HwndSource.FromHwnd(h);
             if (src != null) src.AddHook(Hook);
+            SetProp(h, Remote.WidgetProp, new IntPtr(1));
             SetWindowPos(h, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
         }
 
-        static IntPtr Hook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        IntPtr Hook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
             if (msg == WM_WINDOWPOSCHANGING && !App.DebugMenu)
             {
                 var wp = (WINDOWPOS)Marshal.PtrToStructure(lParam, typeof(WINDOWPOS));
-                wp.hwndInsertAfter = HWND_BOTTOM;
+                wp.hwndInsertAfter = peeking ? HWND_TOPMOST : HWND_BOTTOM;
                 wp.flags &= ~SWP_NOZORDER;
                 Marshal.StructureToPtr(wp, lParam, false);
+            }
+            else if (msg == Remote.PeekMessage && msg != 0)
+            {
+                SetPeek(wParam != IntPtr.Zero);
+                handled = true;
+            }
+            else if (msg == Remote.CommandMessage && msg != 0)
+            {
+                OnCommand(wParam.ToInt32());
+                handled = true;
             }
             return IntPtr.Zero;
         }
 
+        void OnCommand(int command)
+        {
+            if (command == Remote.ReloadSettings)
+            {
+                Settings.Reload();
+                var s = ParseSize(Settings.Get("size"));
+                if (Array.IndexOf(SupportedSizes, s) < 0) s = SupportedSizes[0];
+                bool resized = s != size;
+                size = s;
+                var mode = Theme.Parse(Settings.Get("theme", "system"));
+                if (mode != Theme.Mode) Theme.Mode = mode;   // re-renders through Theme.Changed
+                else if (resized) Render();
+            }
+            else if (command == Remote.ShowMenu)
+            {
+                var m = BuildMenu();
+                ContextMenu = m;
+                m.PlacementTarget = this;
+                m.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                m.HorizontalOffset = Tokens.ShadowRoom;
+                m.Opened += (s, e) =>
+                {
+                    // Opened from BWHub, the menu has to take the foreground or a click elsewhere won't close it.
+                    var src = PresentationSource.FromVisual(m) as HwndSource;
+                    if (src != null) SetForegroundWindow(src.Handle);
+                };
+                m.IsOpen = true;
+            }
+        }
+
+        // ---------- peek (DESIGN.md §6.11): a manager app lifts every widget above other windows for a moment ----------
+
+        bool peeking;
+
+        void SetPeek(bool on)
+        {
+            if (on == peeking || App.DebugMenu) return;
+            var helper = new WindowInteropHelper(this);
+            peeking = on;
+            if (on)
+            {
+                // Owned by the desktop, the widget can't rise above other apps; drop the owner while lifted.
+                helper.Owner = IntPtr.Zero;
+                SetWindowPos(helper.Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+            }
+            else
+            {
+                SetWindowPos(helper.Handle, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+                try { helper.Owner = FindWindow("Progman", null); } catch { }
+                SetWindowPos(helper.Handle, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+            }
+        }
+
         const int GWL_EXSTYLE = -20, WS_EX_TOOLWINDOW = 0x80, WM_WINDOWPOSCHANGING = 0x46;
         const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
-        static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+        static readonly IntPtr HWND_BOTTOM = new IntPtr(1), HWND_TOPMOST = new IntPtr(-1), HWND_NOTOPMOST = new IntPtr(-2);
 
         [StructLayout(LayoutKind.Sequential)]
         struct WINDOWPOS { public IntPtr hwnd, hwndInsertAfter; public int x, y, cx, cy; public uint flags; }
@@ -328,5 +392,23 @@ namespace Bwui
         [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int idx);
         [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int idx, int v);
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool SetProp(IntPtr h, string name, IntPtr data);
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    }
+
+    /// <summary>
+    /// How BWHub talks to widgets (DESIGN.md §6.11). It finds widget windows by the <see cref="WidgetProp"/>
+    /// window property and posts them registered messages:
+    ///   PeekMessage    wParam 1 lifts the widget above other windows, 0 puts it back on the desktop
+    ///   CommandMessage wParam ReloadSettings (settings.txt changed) or ShowMenu (open the right-click menu)
+    /// </summary>
+    public static class Remote
+    {
+        public const string WidgetProp = "BWUI.Widget";
+        public const int ReloadSettings = 1, ShowMenu = 2;
+        public static readonly int PeekMessage = (int)RegisterWindowMessage("BWUI.Peek.v1");
+        public static readonly int CommandMessage = (int)RegisterWindowMessage("BWUI.Command.v1");
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterWindowMessage(string name);
     }
 }
