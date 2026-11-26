@@ -315,6 +315,14 @@ namespace TodayCalendar
                 });
                 var all = new List<CalEvent>();
                 foreach (var l in perAccount) if (l != null) all.AddRange(l);
+                if (err != null) Diag.Log("fetch failed: " + err);
+                else if (all.Count == 0)
+                {
+                    // Counts only: an empty result is worth a line when it isn't expected.
+                    var counts = new List<string>();
+                    foreach (var a in accs) counts.Add((a.Calendars == null ? "?" : a.Calendars.Count.ToString()) + (a.NeedsSignIn ? " (sign-in)" : ""));
+                    Diag.Log("fetch returned no events; calendars per account: " + string.Join(", ", counts.ToArray()));
+                }
                 var first = Merge(all.FindAll(e => Overlaps(e, day)));
                 var second = Merge(all.FindAll(e => Overlaps(e, day.AddDays(1))));
                 Dispatcher.BeginInvoke(new Action(() =>

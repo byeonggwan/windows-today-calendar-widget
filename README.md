@@ -79,6 +79,7 @@ Data lives in `%LOCALAPPDATA%\TodayCalendar`:
 | `oauth-client.json` | Only for builds without a built-in client: a copy of the client JSON you chose |
 | `accounts.json` | Each account's email and its refresh token, encrypted with DPAPI for your Windows user |
 | `settings.txt` | Position, size, theme, update settings |
+| `error.log` | Why a refresh failed or came back empty (error codes and calendar counts only, never event details) |
 
 ## Uninstall
 

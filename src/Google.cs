@@ -333,6 +333,13 @@ namespace TodayCalendar
             return list;
         }
 
+        /// <summary>Google's error reason ("rateLimitExceeded", "forbidden", …) from an error body, or "".</summary>
+        static string Reason(string body)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(body ?? "", "\"reason\"\\s*:\\s*\"([^\"]+)\"");
+            return m.Success ? m.Groups[1].Value : "";
+        }
+
         static List<CalEvent> Calendar(string token, string account, string calId, string calName, DateTime start, DateTime end)
         {
             var list = new List<CalEvent>();
@@ -345,9 +352,17 @@ namespace TodayCalendar
             try { evs = Json.Parse(Get(token, q)); }
             catch (WebException ex)
             {
-                // A calendar we can't read (permissions changed) shouldn't hide the rest.
+                // A calendar we can't read (permissions changed) shouldn't hide the rest. But a 403 for quota,
+                // rate limits or a disabled API is about every calendar: report it instead of showing an empty day.
                 var r = ex.Response as HttpWebResponse;
-                if (r != null && (r.StatusCode == HttpStatusCode.NotFound || r.StatusCode == HttpStatusCode.Forbidden)) return list;
+                if (r != null && (r.StatusCode == HttpStatusCode.NotFound || r.StatusCode == HttpStatusCode.Forbidden))
+                {
+                    var body = Http.ErrorBody(ex);
+                    var reason = Reason(body);
+                    Diag.Log("calendar skipped: HTTP " + (int)r.StatusCode + " " + reason);
+                    if (r.StatusCode == HttpStatusCode.NotFound || reason == "forbidden" || reason == "") return list;
+                    throw new Exception(Bwui.Text.T("구글 캘린더가 요청을 거부했어요 (", "Google Calendar refused the request (") + reason + ")");
+                }
                 throw;
             }
             {
@@ -400,6 +415,26 @@ namespace TodayCalendar
         static string Rfc3339(DateTime local)
         {
             return new DateTimeOffset(local).ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture);
+        }
+    }
+
+    /// <summary>Error reasons only (never event details), in the data folder's error.log, last 128 KB.</summary>
+    static class Diag
+    {
+        static readonly object gate = new object();
+
+        public static void Log(string line)
+        {
+            try
+            {
+                lock (gate)
+                {
+                    var path = Path.Combine(Bwui.App.DataDir("TodayCalendar"), "error.log");
+                    if (File.Exists(path) && new FileInfo(path).Length > 128 * 1024) File.Delete(path);
+                    File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " v" + Bwui.AppInfo.Version + "  " + line + "\r\n");
+                }
+            }
+            catch { }
         }
     }
 

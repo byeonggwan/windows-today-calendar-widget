@@ -18,7 +18,7 @@ Everything stays on your Windows PC, in `%LOCALAPPDATA%\TodayCalendar`:
 - each account's email address and the refresh token Google issued to the app, encrypted with Windows DPAPI so that only your Windows user can read it;
 - widget settings such as position, size and theme.
 
-Event details are kept in memory only while the widget shows them. They are not written to disk.
+Event details are kept in memory only while the widget shows them. They are not written to disk. When a refresh fails or comes back empty, `error.log` in the same folder records why (the HTTP status, Google's error reason, and how many calendars each account has), never event titles, times or calendar names.
 
 ## What the app sends, and to whom
 
